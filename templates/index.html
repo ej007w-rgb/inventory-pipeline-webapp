@@ -81,6 +81,23 @@
 <script>
 let jobId = null, timer = null;
 
+// Read the response as text first: if the server (or something in between)
+// hands back an HTML page instead of JSON, report the HTTP status and a
+// snippet rather than a cryptic JSON parse error.
+async function apiJson(url, opts) {
+  const r = await fetch(url, opts);
+  const text = await r.text();
+  let j = null;
+  try { j = text ? JSON.parse(text) : null; }
+  catch (e) {
+    throw new Error('Server returned a page instead of data (HTTP ' + r.status + '). ' +
+      'The free server may be waking up or restarting - wait 30 seconds and try again. ' +
+      'Snippet: ' + text.slice(0, 120));
+  }
+  if (!r.ok) throw new Error((j && j.error) || ('Request failed (HTTP ' + r.status + ')'));
+  return j;
+}
+
 function setStatus(txt, cls) {
   const el = document.getElementById('status');
   el.textContent = txt; el.className = cls || '';
@@ -117,9 +134,7 @@ async function startJob() {
   document.getElementById('dlBtn').style.display = 'none';
   document.getElementById('filelist').innerHTML = '';
   try {
-    const r = await fetch('/api/jobs', { method:'POST', body:fd });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Upload failed');
+    const j = await apiJson('/api/jobs', { method:'POST', body:fd });
     remember(j.job_id);
     watch(j.job_id);
   } catch (e) { setStatus('Error: ' + e.message, 'err'); btn.disabled = false; }
@@ -133,9 +148,7 @@ function watch(id) {
 }
 async function poll() {
   try {
-    const r = await fetch('/api/jobs/' + jobId);
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'Job not found');
+    const j = await apiJson('/api/jobs/' + jobId);
     const pct = j.total > 0 ? Math.min(100, 100 * j.done / j.total) : 0;
     document.getElementById('bar').style.width = pct + '%';
     setStatus(j.label + (j.status === 'running' ? '  (' + Math.round(pct) + '%)' : ''));
