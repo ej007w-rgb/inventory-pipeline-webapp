@@ -1,0 +1,6 @@
+flask>=3.0
+gunicorn>=21
+pandas>=2.0
+pyarrow>=12
+xlsxwriter>=3.0
+openpyxl>=3.1

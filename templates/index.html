@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventory Pipeline</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2129; --muted:#6b7280; --accent:#2563eb; --ok:#15803d; --err:#b91c1c; }
+  * { box-sizing:border-box; }
+  body { font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); margin:0; padding:24px; }
+  .wrap { max-width:720px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 20px; font-size:14px; }
+  .card { background:var(--card); border:1px solid #e5e7eb; border-radius:12px; padding:20px; margin-bottom:16px; }
+  .card h2 { font-size:15px; margin:0 0 12px; }
+  label.field { display:block; font-size:13px; color:var(--muted); margin-bottom:10px; }
+  label.field input[type=number] { display:block; width:160px; margin-top:4px; padding:8px; font-size:15px; border:1px solid #d1d5db; border-radius:8px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:4px 16px; }
+  input[type=file] { font-size:14px; margin-top:6px; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+  button.run { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:12px 28px; font-size:16px; cursor:pointer; }
+  button.run:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:#fff; border:1px solid #d1d5db; border-radius:8px; padding:8px 16px; font-size:14px; cursor:pointer; }
+  #progress { height:10px; background:#e5e7eb; border-radius:6px; overflow:hidden; margin:12px 0 8px; }
+  #bar { height:100%; width:0%; background:var(--accent); transition:width .3s; }
+  #status { font-size:14px; min-height:20px; }
+  #status.ok { color:var(--ok); } #status.err { color:var(--err); }
+  #filelist { font-size:14px; margin:8px 0; padding-left:20px; }
+  #log { display:none; background:#111827; color:#d1d5db; font:12px/1.5 monospace; padding:12px; border-radius:8px; max-height:220px; overflow:auto; white-space:pre-wrap; margin-top:12px; }
+  .row { display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+  #recent { font-size:13px; color:var(--muted); }
+  #recent a { color:var(--accent); text-decoration:none; margin-right:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Inventory Pipeline</h1>
+  <p class="sub">Upload your files — everything runs on the server, your computer stays free. You can close this tab and come back; your job keeps running.</p>
+
+  <div class="card">
+    <h2>1. Feed files <span style="color:var(--err)">*</span></h2>
+    <input type="file" id="feeds" accept=".csv" multiple>
+    <div class="hint">One or more <b>.csv</b> feed files (your ibo_data_*.csv).</div>
+  </div>
+
+  <div class="card">
+    <h2>2. Customer PO <span style="color:var(--muted)">(optional)</span></h2>
+    <input type="file" id="po" accept=".xlsx,.xls">
+    <div class="hint">Customer_PO.xlsx — skip this if you only want Steps 1–2.</div>
+  </div>
+
+  <div class="card">
+    <h2>3. Pricing</h2>
+    <div class="grid">
+      <label class="field">US rate<input type="number" id="us_rate" step="0.01" value="{{ defaults.us_rate }}"></label>
+      <label class="field">UK rate<input type="number" id="uk_rate" step="0.01" value="{{ defaults.uk_rate }}"></label>
+      <label class="field">LC adder<input type="number" id="lc_adder" step="0.01" value="{{ defaults.lc_adder }}"></label>
+      <label class="field">Margin %<input type="number" id="margin_pct" step="0.1" value="{{ defaults.margin_pct }}"></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4. Run</h2>
+    <button class="run" id="runBtn" onclick="startJob()">Run pipeline</button>
+    <div id="progress"><div id="bar"></div></div>
+    <div id="status"></div>
+    <ul id="filelist"></ul>
+    <div class="row">
+      <button class="ghost" id="dlBtn" style="display:none" onclick="download()">Download results (.zip)</button>
+      <button class="ghost" onclick="toggleLog()">Show log</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div class="card" id="recentCard" style="display:none">
+    <h2>Recent jobs on this browser</h2>
+    <div id="recent"></div>
+  </div>
+</div>
+
+<script>
+let jobId = null, timer = null;
+
+function setStatus(txt, cls) {
+  const el = document.getElementById('status');
+  el.textContent = txt; el.className = cls || '';
+}
+function remember(id) {
+  let ids = JSON.parse(localStorage.getItem('inv_jobs') || '[]');
+  ids = [id, ...ids.filter(x => x !== id)].slice(0, 8);
+  localStorage.setItem('inv_jobs', JSON.stringify(ids));
+  renderRecent();
+}
+function renderRecent() {
+  const ids = JSON.parse(localStorage.getItem('inv_jobs') || '[]');
+  const box = document.getElementById('recent');
+  document.getElementById('recentCard').style.display = ids.length ? '' : 'none';
+  box.innerHTML = '';
+  ids.forEach(id => {
+    const a = document.createElement('a');
+    a.href = '#'; a.textContent = 'job ' + id;
+    a.onclick = e => { e.preventDefault(); watch(id); };
+    box.appendChild(a);
+  });
+}
+async function startJob() {
+  const feeds = document.getElementById('feeds').files;
+  if (!feeds.length) { setStatus('Please choose at least one feed CSV first.', 'err'); return; }
+  const fd = new FormData();
+  for (const f of feeds) fd.append('feeds', f);
+  const po = document.getElementById('po').files[0];
+  if (po) fd.append('po', po);
+  for (const k of ['us_rate','uk_rate','lc_adder','margin_pct'])
+    fd.append(k, document.getElementById(k).value);
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true; setStatus('Uploading…');
+  document.getElementById('dlBtn').style.display = 'none';
+  document.getElementById('filelist').innerHTML = '';
+  try {
+    const r = await fetch('/api/jobs', { method:'POST', body:fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Upload failed');
+    remember(j.job_id);
+    watch(j.job_id);
+  } catch (e) { setStatus('Error: ' + e.message, 'err'); btn.disabled = false; }
+}
+function watch(id) {
+  jobId = id;
+  document.getElementById('runBtn').disabled = true;
+  clearInterval(timer);
+  poll();
+  timer = setInterval(poll, 1500);
+}
+async function poll() {
+  try {
+    const r = await fetch('/api/jobs/' + jobId);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Job not found');
+    const pct = j.total > 0 ? Math.min(100, 100 * j.done / j.total) : 0;
+    document.getElementById('bar').style.width = pct + '%';
+    setStatus(j.label + (j.status === 'running' ? '  (' + Math.round(pct) + '%)' : ''));
+    document.getElementById('log').textContent = (j.log || []).join('\n');
+    if (j.status === 'done') {
+      clearInterval(timer);
+      setStatus(j.label, 'ok');
+      document.getElementById('bar').style.width = '100%';
+      const ul = document.getElementById('filelist'); ul.innerHTML = '';
+      j.files.forEach(f => { const li = document.createElement('li'); li.textContent = f; ul.appendChild(li); });
+      document.getElementById('dlBtn').style.display = '';
+      document.getElementById('runBtn').disabled = false;
+    } else if (j.status === 'failed') {
+      clearInterval(timer);
+      setStatus('Failed: ' + j.error, 'err');
+      document.getElementById('runBtn').disabled = false;
+    }
+  } catch (e) { clearInterval(timer); setStatus('Error: ' + e.message, 'err'); document.getElementById('runBtn').disabled = false; }
+}
+function download() { if (jobId) window.location = '/api/jobs/' + jobId + '/download'; }
+function toggleLog() {
+  const el = document.getElementById('log');
+  el.style.display = el.style.display === 'block' ? 'none' : 'block';
+}
+renderRecent();
+</script>
+</body>
+</html>
